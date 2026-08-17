@@ -19,7 +19,7 @@ concurrency:
 jobs:
   graphwar:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out runner source
@@ -71,7 +71,7 @@ jobs:
           FFPID=$!
 
           set +e
-          timeout --signal=TERM --kill-after=10s 465s \
+          timeout --signal=TERM --kill-after=10s 760s \
             java -javaagent:autoagent.jar -jar graphwar.jar \
             >agent.log 2>&1
           JAVA_RC=$?
@@ -90,7 +90,7 @@ jobs:
           kill "$XVPID" 2>/dev/null || true
 
           echo "===== agent.log tail ====="
-          tail -n 220 agent.log || true
+          tail -n 320 agent.log || true
 
       - name: Report to control issue
         if: always()
@@ -104,10 +104,21 @@ jobs:
             echo "- Trigger: $GITHUB_EVENT_NAME"
             echo
             echo '```text'
-            tail -n 180 agent.log 2>/dev/null || echo "agent.log unavailable"
+            tail -n 240 agent.log 2>/dev/null || echo "agent.log unavailable"
             echo '```'
           } > comment.md
-          jq -Rs '{body:.}' comment.md | gh api -X POST "repos/$GITHUB_REPOSITORY/issues/1/comments" --input - >/dev/null
+
+          reported=0
+          for delay in 0 3 8 15; do
+            sleep "$delay"
+            if jq -Rs '{body:.}' comment.md | gh api -X POST "repos/$GITHUB_REPOSITORY/issues/1/comments" --input - >/dev/null 2>&1; then
+              reported=1
+              break
+            fi
+          done
+          if [ "$reported" -ne 1 ]; then
+            echo "::warning::GitHub issue API unavailable; artifact still contains agent.log"
+          fi
 
       - name: Upload result
         if: always()
