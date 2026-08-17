@@ -35,12 +35,14 @@ public class AutoAgentV2 {
     long now=System.currentTimeMillis();
     List<Room> out=new ArrayList<>();
     for(Room r:new ArrayList<>(all)){
-      if(r.getGameMode()<0||r.getGameMode()>2||r.getNumPlayers()<1||r.getNumPlayers()>=10||!r.getName().startsWith("Public Room"))continue;
+      // Prefer genuinely occupied rooms: skip empty/solo-host rooms entirely.
+      if(r.getGameMode()<0||r.getGameMode()>2||r.getNumPlayers()<2||r.getNumPlayers()>=10||!r.getName().startsWith("Public Room"))continue;
       String k=r.getIp()+":"+r.getPort();
       if(cooldown.getOrDefault(k,0L)<=now)out.add(r);
     }
+    // Most populated joinable room first; game mode only breaks ties.
     out.sort(Comparator.comparingInt(Room::getNumPlayers).reversed().thenComparingInt(Room::getGameMode));
-    log("CANDIDATES="+out.size()+" modes=all prefer=near-full");
+    log("CANDIDATES="+out.size()+" modes=all prefer=most-populated minPlayers=2");
     for(Room r:out)log("CAND "+r.getName()+" mode="+r.getGameMode()+" p="+r.getNumPlayers()+" wait="+(startWait(r)/1000)+"s "+r.getIp()+":"+r.getPort());
     return out;
   }
@@ -119,7 +121,7 @@ public class AutoAgentV2 {
 
       while(System.currentTimeMillis()<END){
         List<Room> list=rooms(gc.getRooms(),cooldown);
-        if(list.isEmpty()){log("No usable occupied Public Room; refresh 5s");nap(5000);continue;}
+        if(list.isEmpty()){log("No usable occupied Public Room with >=2 players; refresh 5s");nap(5000);continue;}
 
         boolean triedOne=false,finishedMatch=false;
         for(Room r:list){
