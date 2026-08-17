@@ -7,7 +7,7 @@ import java.util.*;
 public class AutoAgentV2 {
   static final String NAME="GPT";
   static final long END=System.currentTimeMillis()+7*60_000L;
-  static final long WAIT_START=45_000L;
+  static final long WAIT_START=120_000L;
   static void log(String s){System.out.println("[GPT-BOT] "+s);System.out.flush();}
   static void nap(long n){try{Thread.sleep(n);}catch(Exception e){}}
 
