@@ -5,9 +5,8 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/graphwar.yml"
+      - "src/Graphwar/AutoAgent.java"
   workflow_dispatch:
-  issues:
-    types: [edited]
 
 permissions:
   contents: read
@@ -19,11 +18,13 @@ concurrency:
 
 jobs:
   graphwar:
-    if: github.event_name != 'issues' || github.event.issue.number == 2
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
+      - name: Check out runner source
+        uses: actions/checkout@v5
+
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
@@ -41,25 +42,12 @@ jobs:
           test -s graphwar.jar
           file graphwar.jar
 
-      - name: Fetch my AutoAgent source from issue 2
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build my AutoAgent
         run: |
           set -euo pipefail
-          gh issue view 2 --repo "$GITHUB_REPOSITORY" --json body --jq .body > agent-issue.txt
-          awk '
-            /^AUTOAGENT_GZIP_BASE64_V1/ { found=1; next }
-            found && NF { gsub(/\r/,""); print; exit }
-          ' agent-issue.txt > agent.b64
-          test -s agent.b64
-          mkdir -p src/Graphwar classes
-          base64 -d agent.b64 | gzip -dc > src/Graphwar/AutoAgent.java
-          grep -q "class AutoAgent" src/Graphwar/AutoAgent.java
+          test -s src/Graphwar/AutoAgent.java
           sha256sum src/Graphwar/AutoAgent.java
-
-      - name: Build AutoAgent
-        run: |
-          set -euo pipefail
+          mkdir -p classes
           javac -cp graphwar.jar -d classes src/Graphwar/AutoAgent.java
           printf 'Premain-Class: Graphwar.AutoAgent\n' > MANIFEST.MF
           jar cfm autoagent.jar MANIFEST.MF -C classes .
@@ -101,7 +89,7 @@ jobs:
           kill "$XVPID" 2>/dev/null || true
 
           echo "===== agent.log tail ====="
-          tail -n 160 agent.log || true
+          tail -n 180 agent.log || true
 
       - name: Report to control issue
         if: always()
@@ -115,7 +103,7 @@ jobs:
             echo "- Trigger: $GITHUB_EVENT_NAME"
             echo
             echo '```text'
-            tail -n 120 agent.log 2>/dev/null || echo "agent.log unavailable"
+            tail -n 140 agent.log 2>/dev/null || echo "agent.log unavailable"
             echo '```'
           } > comment.md
           gh issue comment 1 --repo "$GITHUB_REPOSITORY" --body-file comment.md
