@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: graphwar-extra-live
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   play-extra:
