@@ -42,6 +42,23 @@ public class AutoAgentV2 {
     nap(800);
   }
 
+  static int alive(Player p){
+    int n=0;
+    if(p==null)return 0;
+    for(Soldier s:p.getSoldiers())if(s!=null&&s.isAlive())n++;
+    return n;
+  }
+
+  static int outcome(GameData gd){
+    int ours=0,theirs=0;
+    for(Player p:new ArrayList<>(gd.getPlayers())){
+      if(p.isLocalPlayer())ours+=alive(p);else theirs+=alive(p);
+    }
+    if(ours>0&&theirs==0)return 1;
+    if(ours==0&&theirs>0)return -1;
+    return 0;
+  }
+
   static boolean play(GameData gd){
     boolean started=false;int lp=-1,ls=-1;long last=0;
     while(System.currentTimeMillis()<END){
@@ -57,13 +74,13 @@ public class AutoAgentV2 {
           }
         }
       }else if(started){
-        log("GAME_ENDED state="+st);AutoAgent.dump(gd.getPlayers());nap(5000);return true;
+        log("GAME_ENDED state="+st);AutoAgent.dump(gd.getPlayers());nap(3500);return true;
       }else if(st==0){
         log("DISCONNECTED_IN_GAME_WAIT");return false;
       }
       nap(100);
     }
-    log("TIME_LIMIT_DURING_GAME");return started;
+    log("TIME_LIMIT_DURING_GAME");return false;
   }
 
   static void run(){
@@ -82,13 +99,13 @@ public class AutoAgentV2 {
 
       GameData gd=g.getGameData();
       Map<String,Long> cooldown=new HashMap<>();
-      int attempt=0;
+      int attempt=0,matches=0,wins=0,losses=0;
 
       while(System.currentTimeMillis()<END){
         List<Room> list=rooms(gc.getRooms(),cooldown);
         if(list.isEmpty()){log("No usable occupied Public Room; refresh 5s");nap(5000);continue;}
 
-        boolean triedOne=false;
+        boolean triedOne=false,finishedMatch=false;
         for(Room r:list){
           if(System.currentTimeMillis()>=END)break;
           triedOne=true;attempt++;
@@ -125,7 +142,15 @@ public class AutoAgentV2 {
 
           if(gd.getGameState()==2){
             log("START_CONFIRMED in "+r.getName());
-            if(play(gd))return;
+            if(play(gd)){
+              int result=outcome(gd);matches++;
+              if(result>0)wins++;else if(result<0)losses++;
+              log("MATCH_RESULT #"+matches+" "+(result>0?"WIN":result<0?"LOSS":"DRAW/UNKNOWN")+" score="+wins+"-"+losses);
+              cooldown.put(key,System.currentTimeMillis()+30_000L);
+              leave(gd);
+              finishedMatch=true;
+              break;
+            }
             cooldown.put(key,System.currentTimeMillis()+60_000L);
             leave(gd);continue;
           }
@@ -139,9 +164,11 @@ public class AutoAgentV2 {
           }
           leave(gd);
         }
+        if(finishedMatch){log("BACK_TO_MATCHMAKING matches="+matches+" wins="+wins+" losses="+losses);nap(1000);continue;}
         if(!triedOne)nap(3000);
       }
-      log("TIME_LIMIT_NO_MATCH");
+      log("SESSION_SUMMARY matches="+matches+" wins="+wins+" losses="+losses);
+      log("TIME_LIMIT_NO_MORE_MATCHES");
     }catch(Throwable t){log("FATAL "+t);t.printStackTrace(System.out);}
   }
 }
