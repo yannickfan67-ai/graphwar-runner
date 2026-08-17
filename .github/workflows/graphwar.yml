@@ -107,7 +107,7 @@ jobs:
             tail -n 180 agent.log 2>/dev/null || echo "agent.log unavailable"
             echo '```'
           } > comment.md
-          gh issue comment 1 --repo "$GITHUB_REPOSITORY" --body-file comment.md
+          jq -Rs '{body:.}' comment.md | gh api -X POST "repos/$GITHUB_REPOSITORY/issues/1/comments" --input - >/dev/null
 
       - name: Upload result
         if: always()
