@@ -7,7 +7,6 @@ import java.util.*;
 public class AutoAgentV2 {
   static final String NAME="GPT";
   static final long END=System.currentTimeMillis()+7*60_000L;
-  static final long WAIT_START=120_000L;
   static void log(String s){System.out.println("[GPT-BOT] "+s);System.out.flush();}
   static void nap(long n){try{Thread.sleep(n);}catch(Exception e){}}
 
@@ -21,6 +20,17 @@ public class AutoAgentV2 {
     return null;
   }
 
+  static long startWait(Room r){
+    int p=r.getNumPlayers();
+    if(p<=1)return 120_000L;
+    if(p==2)return 60_000L;
+    return 20_000L;
+  }
+
+  static long rejectCooldown(Room r){
+    return r.getNumPlayers()>=3?180_000L:60_000L;
+  }
+
   static List<Room> rooms(List<Room> all,Map<String,Long> cooldown){
     long now=System.currentTimeMillis();
     List<Room> out=new ArrayList<>();
@@ -29,9 +39,9 @@ public class AutoAgentV2 {
       String k=r.getIp()+":"+r.getPort();
       if(cooldown.getOrDefault(k,0L)<=now)out.add(r);
     }
-    out.sort(Comparator.comparingInt(Room::getNumPlayers).reversed());
-    log("CANDIDATES="+out.size()+" prefer=near-full");
-    for(Room r:out)log("CAND "+r.getName()+" p="+r.getNumPlayers()+" "+r.getIp()+":"+r.getPort());
+    out.sort(Comparator.comparingInt(Room::getNumPlayers));
+    log("CANDIDATES="+out.size()+" prefer=1-player-host");
+    for(Room r:out)log("CAND "+r.getName()+" p="+r.getNumPlayers()+" wait="+(startWait(r)/1000)+"s "+r.getIp()+":"+r.getPort());
     return out;
   }
 
@@ -128,16 +138,18 @@ public class AutoAgentV2 {
 
           if(me==null){
             log("ROOM_REJECTED "+key+" state="+gd.getGameState());
-            cooldown.put(key,System.currentTimeMillis()+60_000L);
+            cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));
             leave(gd);continue;
           }
 
           log("JOINED_ROOM "+r.getName()+" id="+me.getID()+" team="+me.getTeam()+" soldiers="+me.getNumSoldiers());
           Player o=AutoAgent.other(gd.getPlayers());
           if(o!=null&&o.getTeam()==me.getTeam()){gd.switchSide(me);log("SWITCH_SIDE vs "+o.getName());nap(800);}
-          gd.setReady(me,true);log("READY; waiting up to "+(WAIT_START/1000)+"s");
+          gd.setReady(me,true);
+          long wait=startWait(r);
+          log("READY; waiting up to "+(wait/1000)+"s (room p="+r.getNumPlayers()+")");
 
-          long wd=Math.min(END,System.currentTimeMillis()+WAIT_START);
+          long wd=Math.min(END,System.currentTimeMillis()+wait);
           while(System.currentTimeMillis()<wd&&gd.getGameState()!=2&&gd.getGameState()!=0)nap(100);
 
           if(gd.getGameState()==2){
@@ -151,16 +163,16 @@ public class AutoAgentV2 {
               finishedMatch=true;
               break;
             }
-            cooldown.put(key,System.currentTimeMillis()+60_000L);
+            cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));
             leave(gd);continue;
           }
 
           if(gd.getGameState()==0){
             log("ROOM_DISCONNECTED_BEFORE_START "+key);
-            cooldown.put(key,System.currentTimeMillis()+60_000L);
+            cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));
           }else{
             log("IDLE_ROOM_TIMEOUT "+r.getName()+"; switching rooms");
-            cooldown.put(key,System.currentTimeMillis()+120_000L);
+            cooldown.put(key,System.currentTimeMillis()+(r.getNumPlayers()>=3?180_000L:120_000L));
           }
           leave(gd);
         }
