@@ -24,8 +24,13 @@ concurrency:
 
 jobs:
   graphwar:
+    name: graphwar-${{ matrix.instance }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        instance: [A, B]
 
     steps:
       - name: Check out runner source
@@ -49,119 +54,129 @@ jobs:
           file graphwar.jar
 
       - name: Build my AutoAgent V2
+        env:
+          INSTANCE: ${{ matrix.instance }}
         run: |
           set -euo pipefail
           test -s src/Graphwar/AutoAgent.java
           test -s src/Graphwar/AutoAgentV2.java
-          sha256sum src/Graphwar/AutoAgent.java src/Graphwar/AutoAgentV2.java
+          sed -i "s/static final String NAME=\"GPT\";/static final String NAME=\"GPT-${INSTANCE}\";/" src/Graphwar/AutoAgentV2.java
+          grep 'static final String NAME' src/Graphwar/AutoAgentV2.java
           mkdir -p classes
           javac -cp graphwar.jar -d classes src/Graphwar/AutoAgent.java src/Graphwar/AutoAgentV2.java
           printf 'Premain-Class: Graphwar.AutoAgentV2\n' > MANIFEST.MF
           jar cfm autoagent.jar MANIFEST.MF -C classes .
-          jar tf autoagent.jar | grep 'Graphwar/AutoAgent'
 
-      - name: Run original Graphwar on official server
+      - name: Run and record official Graphwar
         shell: bash
+        env:
+          INSTANCE: ${{ matrix.instance }}
         run: |
           set -uo pipefail
           export DISPLAY=:99
-
-          Xvfb :99 -screen 0 1280x800x24 >xvfb.log 2>&1 &
+          Xvfb :99 -screen 0 1280x800x24 >"xvfb-${INSTANCE}.log" 2>&1 &
           XVPID=$!
           sleep 1
-
           ffmpeg -y \
             -f x11grab -framerate 8 -video_size 1280x800 -i :99 \
             -c:v libx264 -preset veryfast -crf 30 -pix_fmt yuv420p \
-            graphwar-official-autoplay.mp4 >ffmpeg.log 2>&1 &
+            -f segment -segment_time 1800 -reset_timestamps 1 \
+            "graphwar-${INSTANCE}-%03d.mp4" >"ffmpeg-${INSTANCE}.log" 2>&1 &
           FFPID=$!
-
           set +e
           timeout --signal=TERM --kill-after=10s 18120s \
             java -javaagent:autoagent.jar -jar graphwar.jar \
-            >agent.log 2>&1
+            >"agent-${INSTANCE}.log" 2>&1
           JAVA_RC=$?
           set -e
-
-          echo "java_exit=$JAVA_RC" | tee run-status.txt
+          echo "java_exit=$JAVA_RC" | tee "run-status-${INSTANCE}.txt"
           sleep 2
-
           ffmpeg -y \
             -f x11grab -video_size 1280x800 -i :99 \
-            -frames:v 1 graphwar-final.png \
-            >screenshot.log 2>&1 || true
-
+            -frames:v 1 "graphwar-final-${INSTANCE}.png" \
+            >"screenshot-${INSTANCE}.log" 2>&1 || true
           kill -INT "$FFPID" 2>/dev/null || true
-          sleep 2
+          sleep 3
           kill "$XVPID" 2>/dev/null || true
-
-          echo "===== agent.log tail ====="
-          tail -n 400 agent.log || true
+          tail -n 400 "agent-${INSTANCE}.log" || true
 
       - name: Report to control issue
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          INSTANCE: ${{ matrix.instance }}
         run: |
           {
-            echo '### [GPT-BOT] Graphwar unattended run finished'
+            echo "### [GPT-${INSTANCE}] Graphwar unattended run finished"
             echo
             echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- Trigger: $GITHUB_EVENT_NAME"
+            echo "- Instance: $INSTANCE"
             echo "- Chain: ${{ inputs.chain || '0' }}"
             echo
             echo '```text'
-            tail -n 300 agent.log 2>/dev/null || echo "agent.log unavailable"
+            tail -n 300 "agent-${INSTANCE}.log" 2>/dev/null || echo "agent log unavailable"
             echo '```'
-          } > comment.md
-
-          reported=0
+          } > "comment-${INSTANCE}.md"
           for delay in 0 3 8 15; do
             sleep "$delay"
-            if jq -Rs '{body:.}' comment.md | gh api -X POST "repos/$GITHUB_REPOSITORY/issues/1/comments" --input - >/dev/null 2>&1; then
-              reported=1
-              break
-            fi
+            jq -Rs '{body:.}' "comment-${INSTANCE}.md" | gh api -X POST "repos/$GITHUB_REPOSITORY/issues/1/comments" --input - >/dev/null 2>&1 && break
           done
-          if [ "$reported" -ne 1 ]; then
-            echo "::warning::GitHub issue API unavailable; artifact still contains agent.log"
-          fi
 
-      - name: Upload result and recording
+      - name: Upload recording and result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: graphwar-official-autoplay-${{ github.run_number }}
+          name: graphwar-video-${{ github.run_number }}-${{ matrix.instance }}
           compression-level: 1
           path: |
-            graphwar-official-autoplay.mp4
-            graphwar-final.png
-            agent.log
-            run-status.txt
-            xvfb.log
-            ffmpeg.log
-            screenshot.log
+            graphwar-${{ matrix.instance }}-*.mp4
+            graphwar-final-${{ matrix.instance }}.png
+            agent-${{ matrix.instance }}.log
+            run-status-${{ matrix.instance }}.txt
+            xvfb-${{ matrix.instance }}.log
+            ffmpeg-${{ matrix.instance }}.log
+            screenshot-${{ matrix.instance }}.log
           if-no-files-found: warn
 
-      - name: Continue unattended if no win
+      - name: Upload lightweight status
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphwar-status-${{ github.run_number }}-${{ matrix.instance }}
+          compression-level: 9
+          path: |
+            agent-${{ matrix.instance }}.log
+            run-status-${{ matrix.instance }}.txt
+          if-no-files-found: warn
+
+  continue:
+    name: continue-unattended-chain
+    needs: graphwar
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download both status artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: graphwar-status-${{ github.run_number }}-*
+          path: statuses
+      - name: Continue only if neither runner won
         env:
           GH_TOKEN: ${{ github.token }}
           CHAIN: ${{ inputs.chain || '0' }}
         shell: bash
         run: |
-          if grep -q 'WIN_REACHED' agent.log 2>/dev/null; then
-            echo "Win reached; unattended chain stops here."
+          grep -R 'WIN_REACHED\|MATCH_RESULT\|SESSION_SUMMARY' statuses || true
+          if grep -R -q 'WIN_REACHED' statuses 2>/dev/null; then
+            echo "At least one runner won; unattended chain stops here."
             exit 0
           fi
-
           if [ "$CHAIN" -ge 4 ]; then
-            echo "No win after 5 unattended sessions; stopping to avoid an unbounded Actions loop."
+            echo "No win after 5 unattended dual-runner sessions; stopping."
             exit 0
           fi
-
           NEXT=$((CHAIN + 1))
-          echo "No win yet; dispatching unattended continuation $NEXT/4"
           jq -nc --arg ref "$GITHUB_REF_NAME" --arg chain "$NEXT" \
             '{ref:$ref,inputs:{chain:$chain}}' \
             | gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/graphwar.yml/dispatches" --input -
