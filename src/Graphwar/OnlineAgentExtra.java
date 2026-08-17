@@ -7,7 +7,6 @@ import GraphServer.Constants;
 
 public class OnlineAgentExtra {
   static final String NAME = "GPT-2";
-  static final String TARGET_ROOM = "Public Room 0";
   static final long END = System.currentTimeMillis() + 45L*60_000L;
   static void log(String s){System.out.println("[GPT-EXTRA] "+s);System.out.flush();}
   static void nap(long n){try{Thread.sleep(n);}catch(Exception e){}}
@@ -52,16 +51,24 @@ public class OnlineAgentExtra {
   static List<Room> rooms(List<Room> all,Map<String,Long> cd){
     long now=System.currentTimeMillis();List<Room> out=new ArrayList<>();
     for(Room r:new ArrayList<>(all)){
-      if(r.getNumPlayers()<1||r.getNumPlayers()>=10)continue;
+      if(r.getNumPlayers()<2||r.getNumPlayers()>=10)continue;
       if(r.getGameMode()<0||r.getGameMode()>2)continue;
-      if(!r.getName().trim().equalsIgnoreCase(TARGET_ROOM))continue;
+      if(!r.getName().startsWith("Public Room"))continue;
       String k=r.getIp()+":"+r.getPort();
       if(cd.getOrDefault(k,0L)<=now)out.add(r);
     }
     out.sort(Comparator.comparingInt(Room::getNumPlayers).reversed().thenComparingInt(Room::getGameMode));
-    log("TARGET_SCAN room='"+TARGET_ROOM+"' matches="+out.size());
-    for(Room r:out)log("TARGET_FOUND "+r.getName()+" p="+r.getNumPlayers()+" mode="+r.getGameMode()+" "+r.getIp()+":"+r.getPort());
+    log("CANDIDATES="+out.size()+" prefer=most-populated minPlayers=2");
+    for(Room r:out)log("CAND "+r.getName()+" p="+r.getNumPlayers()+" mode="+r.getGameMode()+" "+r.getIp()+":"+r.getPort());
     return out;
+  }
+
+  static long waitForStart(Room r){
+    int p=r.getNumPlayers();
+    if(p>=8)return 90_000L;
+    if(p>=6)return 75_000L;
+    if(p>=4)return 60_000L;
+    return 45_000L;
   }
 
   static void balanceSide(GameData gd,Player me){
@@ -117,7 +124,7 @@ public class OnlineAgentExtra {
       while(System.currentTimeMillis()<d&&(g.getGlobalClient()==null||g.getGameData()==null||g.getUI()==null))nap(100);
       if(g.getGlobalClient()==null||g.getGameData()==null||g.getUI()==null){log("ERROR init timeout");return;}
 
-      g.joinGlobal(NAME);log("JOIN_GLOBAL "+NAME+" target='"+TARGET_ROOM+"'");
+      g.joinGlobal(NAME);log("JOIN_GLOBAL "+NAME);
       GlobalClient gc=g.getGlobalClient();
       d=System.currentTimeMillis()+25_000L;
       while(System.currentTimeMillis()<d&&gc.getRooms().isEmpty())nap(100);
@@ -127,12 +134,12 @@ public class OnlineAgentExtra {
       int attempts=0,matches=0,wins=0,losses=0;
       while(System.currentTimeMillis()<END){
         List<Room> list=rooms(gc.getRooms(),cd);
-        if(list.isEmpty()){log("TARGET_NOT_AVAILABLE '"+TARGET_ROOM+"'; refresh 2s");nap(2000);continue;}
+        if(list.isEmpty()){log("NO_MULTI_ROOM; refresh 4s");nap(4000);continue;}
 
         for(Room r:list){
           if(System.currentTimeMillis()>=END)break;
           attempts++;String key=r.getIp()+":"+r.getPort();
-          log("TRY_TARGET #"+attempts+" "+r.getName()+" p="+r.getNumPlayers()+" mode="+r.getGameMode());
+          log("TRY_ROOM #"+attempts+" "+r.getName()+" p="+r.getNumPlayers()+" mode="+r.getGameMode());
           Player me=null;
           try{
             g.joinGame(r.getIp(),r.getPort());gd.addPlayer(gc.getLocalPlayerName());g.getUI().setScreen(1);
@@ -142,27 +149,22 @@ public class OnlineAgentExtra {
             }
           }catch(Throwable x){log("ROOM_CONNECT_ERROR "+key+" "+x);}
 
-          if(me==null){log("TARGET_REJECTED "+key);cd.put(key,System.currentTimeMillis()+8_000L);leave(gd);continue;}
-          d=System.currentTimeMillis()+7000L;
+          if(me==null){log("ROOM_REJECTED "+key);cd.put(key,System.currentTimeMillis()+45_000L);leave(gd);continue;}
+          d=System.currentTimeMillis()+5000L;
           while(System.currentTimeMillis()<d&&gd.getPlayers().size()<2&&gd.getGameState()!=0)nap(100);
-          if(gd.getPlayers().size()<2){log("NO_REMOTE_AFTER_JOIN; reacquire target");cd.put(key,System.currentTimeMillis()+10_000L);leave(gd);continue;}
+          if(gd.getPlayers().size()<2){log("NO_REMOTE_AFTER_JOIN; leave");cd.put(key,System.currentTimeMillis()+60_000L);leave(gd);continue;}
 
           balanceSide(gd,me);
           int myTeam=me.getTeam();
           if(enemyPlayers(gd,myTeam)==0){
-            log("NO_ENEMY_TEAM_AFTER_JOIN team="+myTeam+"; reacquire target");cd.put(key,System.currentTimeMillis()+10_000L);leave(gd);continue;
+            log("NO_ENEMY_TEAM_AFTER_JOIN team="+myTeam+"; leave");cd.put(key,System.currentTimeMillis()+60_000L);leave(gd);continue;
           }
 
-          log("LOCKED_ROOM "+r.getName()+" players="+gd.getPlayers().size()+" myTeam="+myTeam+" enemies="+enemyPlayers(gd,myTeam));
-          gd.setReady(me,true);log("READY_LOCKED; waiting in target until start/opponent leaves");
-          long nextHeartbeat=System.currentTimeMillis()+30_000L;
-          while(System.currentTimeMillis()<END&&gd.getGameState()!=2&&gd.getGameState()!=0){
-            if(enemyPlayers(gd,myTeam)==0)break;
-            if(System.currentTimeMillis()>=nextHeartbeat){
-              log("STILL_LOCKED "+r.getName()+" players="+gd.getPlayers().size()+" enemies="+enemyPlayers(gd,myTeam));
-              nextHeartbeat=System.currentTimeMillis()+30_000L;
-            }
-            nap(100);
+          log("JOINED_ROOM "+r.getName()+" players="+gd.getPlayers().size()+" myTeam="+myTeam+" enemies="+enemyPlayers(gd,myTeam));
+          gd.setReady(me,true);log("READY wait="+(waitForStart(r)/1000)+"s");
+          long wd=Math.min(END,System.currentTimeMillis()+waitForStart(r));
+          while(System.currentTimeMillis()<wd&&gd.getGameState()!=2&&gd.getGameState()!=0){
+            if(enemyPlayers(gd,myTeam)==0)break;nap(100);
           }
 
           if(gd.getGameState()==2&&enemyPlayers(gd,myTeam)>0){
@@ -170,12 +172,10 @@ public class OnlineAgentExtra {
             if(result>0){wins++;log("MATCH_RESULT #"+matches+" WIN score="+wins+"-"+losses);log("WIN_REACHED");return;}
             if(result<0)losses++;
             log("MATCH_RESULT #"+matches+" "+(result<0?"LOSS":"DRAW/UNKNOWN")+" score="+wins+"-"+losses);
-            cd.put(key,System.currentTimeMillis()+5_000L);leave(gd);break;
+            cd.put(key,System.currentTimeMillis()+30_000L);leave(gd);break;
           }
 
-          if(gd.getGameState()==0)log("TARGET_DISCONNECTED; reacquire");
-          else log("TARGET_OPPONENT_LEFT; reacquire");
-          cd.put(key,System.currentTimeMillis()+5_000L);leave(gd);
+          log("NO_START_OR_ENEMY_LEFT; switching room");cd.put(key,System.currentTimeMillis()+60_000L);leave(gd);
         }
       }
       log("SESSION_SUMMARY matches="+matches+" wins="+wins+" losses="+losses);
