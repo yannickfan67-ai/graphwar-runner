@@ -6,7 +6,7 @@ import java.util.*;
 
 public class AutoAgentV2 {
   static final String NAME="GPT";
-  static final long END=System.currentTimeMillis()+7*60_000L;
+  static final long END=System.currentTimeMillis()+12*60_000L;
   static void log(String s){System.out.println("[GPT-BOT] "+s);System.out.flush();}
   static void nap(long n){try{Thread.sleep(n);}catch(Exception e){}}
 
@@ -27,46 +27,38 @@ public class AutoAgentV2 {
     return 20_000L;
   }
 
-  static long rejectCooldown(Room r){
-    return r.getNumPlayers()>=3?180_000L:60_000L;
-  }
+  static long rejectCooldown(Room r){return r.getNumPlayers()>=3?180_000L:60_000L;}
 
   static List<Room> rooms(List<Room> all,Map<String,Long> cooldown){
     long now=System.currentTimeMillis();
     List<Room> out=new ArrayList<>();
     for(Room r:new ArrayList<>(all)){
-      if(r.getGameMode()!=0||r.getNumPlayers()<1||r.getNumPlayers()>=10||!r.getName().startsWith("Public Room"))continue;
+      if(r.getGameMode()<0||r.getGameMode()>2||r.getNumPlayers()<1||r.getNumPlayers()>=10||!r.getName().startsWith("Public Room"))continue;
       String k=r.getIp()+":"+r.getPort();
       if(cooldown.getOrDefault(k,0L)<=now)out.add(r);
     }
-    out.sort(Comparator.comparingInt(Room::getNumPlayers));
-    log("CANDIDATES="+out.size()+" prefer=1-player-host");
-    for(Room r:out)log("CAND "+r.getName()+" p="+r.getNumPlayers()+" wait="+(startWait(r)/1000)+"s "+r.getIp()+":"+r.getPort());
+    out.sort(Comparator.comparingInt(Room::getNumPlayers).thenComparingInt(Room::getGameMode));
+    log("CANDIDATES="+out.size()+" modes=normal+ode prefer=1-player-host");
+    for(Room r:out)log("CAND "+r.getName()+" mode="+r.getGameMode()+" p="+r.getNumPlayers()+" wait="+(startWait(r)/1000)+"s "+r.getIp()+":"+r.getPort());
     return out;
   }
 
   static void leave(GameData gd){
-    try{
-      if(gd.getGameState()==0)gd.stopGame();else gd.disconnect();
-    }catch(Throwable x){try{gd.stopGame();}catch(Throwable y){}}
+    try{if(gd.getGameState()==0)gd.stopGame();else gd.disconnect();}
+    catch(Throwable x){try{gd.stopGame();}catch(Throwable y){}}
     nap(800);
   }
 
   static int alive(Player p){
-    int n=0;
-    if(p==null)return 0;
+    int n=0;if(p==null)return 0;
     for(Soldier s:p.getSoldiers())if(s!=null&&s.isAlive())n++;
     return n;
   }
 
   static int outcome(GameData gd){
     int ours=0,theirs=0;
-    for(Player p:new ArrayList<>(gd.getPlayers())){
-      if(p.isLocalPlayer())ours+=alive(p);else theirs+=alive(p);
-    }
-    if(ours>0&&theirs==0)return 1;
-    if(ours==0&&theirs>0)return -1;
-    return 0;
+    for(Player p:new ArrayList<>(gd.getPlayers())){if(p.isLocalPlayer())ours+=alive(p);else theirs+=alive(p);}
+    if(ours>0&&theirs==0)return 1;if(ours==0&&theirs>0)return -1;return 0;
   }
 
   static boolean play(GameData gd){
@@ -74,20 +66,20 @@ public class AutoAgentV2 {
     while(System.currentTimeMillis()<END){
       int st=gd.getGameState();
       if(st==2){
-        if(!started){started=true;log("GAME_STARTED players="+gd.getPlayers().size());AutoAgent.dump(gd.getPlayers());}
+        if(!started){started=true;log("GAME_STARTED mode="+gd.getGameMode()+" players="+gd.getPlayers().size());AutoAgent.dump(gd.getPlayers());}
         Player cur=gd.getCurrentTurnPlayer();
         if(cur!=null&&cur.isLocalPlayer()&&!gd.isDrawingFunction()&&!gd.isExploding()){
           int s=cur.getCurrentTurnSoldierIndex();
           if(cur.getID()!=lp||s!=ls||System.currentTimeMillis()-last>8000){
-            String f=AutoAgent.aim(gd,cur);log("FIRE "+f);gd.sendFunction(f);
+            String f=AutoAgent.aim(gd,cur);
+            if(AutoAgent.LAST_HAS_ANGLE){gd.setAngle(AutoAgent.LAST_ANGLE);nap(120);log("ANGLE "+AutoAgent.fmt(AutoAgent.LAST_ANGLE));}
+            log("FIRE "+f);gd.sendFunction(f);
             lp=cur.getID();ls=s;last=System.currentTimeMillis();nap(1200);
           }
         }
       }else if(started){
         log("GAME_ENDED state="+st);AutoAgent.dump(gd.getPlayers());nap(3500);return true;
-      }else if(st==0){
-        log("DISCONNECTED_IN_GAME_WAIT");return false;
-      }
+      }else if(st==0){log("DISCONNECTED_IN_GAME_WAIT");return false;}
       nap(100);
     }
     log("TIME_LIMIT_DURING_GAME");return false;
@@ -107,8 +99,7 @@ public class AutoAgentV2 {
       while(System.currentTimeMillis()<d&&gc.getRooms().isEmpty())nap(100);
       log("ROOMS="+gc.getRooms().size());
 
-      GameData gd=g.getGameData();
-      Map<String,Long> cooldown=new HashMap<>();
+      GameData gd=g.getGameData();Map<String,Long> cooldown=new HashMap<>();
       int attempt=0,matches=0,wins=0,losses=0;
 
       while(System.currentTimeMillis()<END){
@@ -120,67 +111,44 @@ public class AutoAgentV2 {
           if(System.currentTimeMillis()>=END)break;
           triedOne=true;attempt++;
           String key=r.getIp()+":"+r.getPort();
-          log("TRY_ROOM #"+attempt+" "+r.getName()+" p="+r.getNumPlayers()+" "+key);
+          log("TRY_ROOM #"+attempt+" "+r.getName()+" mode="+r.getGameMode()+" p="+r.getNumPlayers()+" "+key);
 
           Player me=null;
           try{
-            g.joinGame(r.getIp(),r.getPort());
-            gd.addPlayer(gc.getLocalPlayerName());
-            g.getUI().setScreen(1);
+            g.joinGame(r.getIp(),r.getPort());gd.addPlayer(gc.getLocalPlayerName());g.getUI().setScreen(1);
             d=System.currentTimeMillis()+6500;
-            while(System.currentTimeMillis()<d){
-              me=gd.getFirstLocalPlayer();
-              if(me!=null)break;
-              if(gd.getGameState()==0)break;
-              nap(100);
-            }
+            while(System.currentTimeMillis()<d){me=gd.getFirstLocalPlayer();if(me!=null)break;if(gd.getGameState()==0)break;nap(100);}
           }catch(Throwable x){log("ROOM_CONNECT_ERROR "+key+" "+x);}
 
-          if(me==null){
-            log("ROOM_REJECTED "+key+" state="+gd.getGameState());
-            cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));
-            leave(gd);continue;
-          }
+          if(me==null){log("ROOM_REJECTED "+key+" state="+gd.getGameState());cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));leave(gd);continue;}
 
-          log("JOINED_ROOM "+r.getName()+" id="+me.getID()+" team="+me.getTeam()+" soldiers="+me.getNumSoldiers());
+          log("JOINED_ROOM "+r.getName()+" mode="+gd.getGameMode()+" id="+me.getID()+" team="+me.getTeam()+" soldiers="+me.getNumSoldiers());
           Player o=AutoAgent.other(gd.getPlayers());
           if(o!=null&&o.getTeam()==me.getTeam()){gd.switchSide(me);log("SWITCH_SIDE vs "+o.getName());nap(800);}
           gd.setReady(me,true);
-          long wait=startWait(r);
-          log("READY; waiting up to "+(wait/1000)+"s (room p="+r.getNumPlayers()+")");
+          long wait=startWait(r);log("READY; waiting up to "+(wait/1000)+"s (mode="+gd.getGameMode()+", room p="+r.getNumPlayers()+")");
 
           long wd=Math.min(END,System.currentTimeMillis()+wait);
           while(System.currentTimeMillis()<wd&&gd.getGameState()!=2&&gd.getGameState()!=0)nap(100);
 
           if(gd.getGameState()==2){
-            log("START_CONFIRMED in "+r.getName());
+            log("START_CONFIRMED in "+r.getName()+" mode="+gd.getGameMode());
             if(play(gd)){
-              int result=outcome(gd);matches++;
-              if(result>0)wins++;else if(result<0)losses++;
+              int result=outcome(gd);matches++;if(result>0)wins++;else if(result<0)losses++;
               log("MATCH_RESULT #"+matches+" "+(result>0?"WIN":result<0?"LOSS":"DRAW/UNKNOWN")+" score="+wins+"-"+losses);
-              cooldown.put(key,System.currentTimeMillis()+30_000L);
-              leave(gd);
-              finishedMatch=true;
-              break;
+              cooldown.put(key,System.currentTimeMillis()+30_000L);leave(gd);finishedMatch=true;break;
             }
-            cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));
-            leave(gd);continue;
+            cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));leave(gd);continue;
           }
 
-          if(gd.getGameState()==0){
-            log("ROOM_DISCONNECTED_BEFORE_START "+key);
-            cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));
-          }else{
-            log("IDLE_ROOM_TIMEOUT "+r.getName()+"; switching rooms");
-            cooldown.put(key,System.currentTimeMillis()+(r.getNumPlayers()>=3?180_000L:120_000L));
-          }
+          if(gd.getGameState()==0){log("ROOM_DISCONNECTED_BEFORE_START "+key);cooldown.put(key,System.currentTimeMillis()+rejectCooldown(r));}
+          else{log("IDLE_ROOM_TIMEOUT "+r.getName()+"; switching rooms");cooldown.put(key,System.currentTimeMillis()+(r.getNumPlayers()>=3?180_000L:120_000L));}
           leave(gd);
         }
         if(finishedMatch){log("BACK_TO_MATCHMAKING matches="+matches+" wins="+wins+" losses="+losses);nap(1000);continue;}
         if(!triedOne)nap(3000);
       }
-      log("SESSION_SUMMARY matches="+matches+" wins="+wins+" losses="+losses);
-      log("TIME_LIMIT_NO_MORE_MATCHES");
+      log("SESSION_SUMMARY matches="+matches+" wins="+wins+" losses="+losses);log("TIME_LIMIT_NO_MORE_MATCHES");
     }catch(Throwable t){log("FATAL "+t);t.printStackTrace(System.out);}
   }
 }
