@@ -1,0 +1,135 @@
+name: Graphwar Extra Live Runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/graphwar-extra.yml"
+      - "src/Graphwar/OnlineAgentExtra.java"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: graphwar-extra-live
+  cancel-in-progress: false
+
+jobs:
+  play-extra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 52
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install GUI and recorder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb ffmpeg
+
+      - name: Download Graphwar
+        run: |
+          curl -fL --retry 3 "https://www.graphwar.com/graphwar_1/graphwar.jar" -o graphwar.jar
+          test -s graphwar.jar
+
+      - name: Build independent agent
+        run: |
+          set -euo pipefail
+          mkdir -p classes
+          javac -cp graphwar.jar -d classes src/Graphwar/AutoAgent.java src/Graphwar/OnlineAgentExtra.java
+          printf 'Premain-Class: Graphwar.OnlineAgentExtra\n' > MANIFEST-EXTRA.MF
+          jar cfm online-agent-extra.jar MANIFEST-EXTRA.MF -C classes .
+          jar tf online-agent-extra.jar | grep 'Graphwar/OnlineAgentExtra'
+
+      - name: Play official server with live status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          export DISPLAY=:98
+
+          Xvfb :98 -screen 0 1280x800x24 >xvfb-extra.log 2>&1 &
+          XVPID=$!
+          sleep 1
+
+          ffmpeg -y \
+            -f x11grab -framerate 10 -video_size 1280x800 -i :98 \
+            -c:v libx264 -preset veryfast -crf 29 -pix_fmt yuv420p \
+            -f segment -segment_time 900 -reset_timestamps 1 \
+            'graphwar-extra-%03d.mp4' >ffmpeg-extra.log 2>&1 &
+          FFPID=$!
+
+          INITIAL="### [GPT-2] Live Graphwar runner\n\n- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\n- Status: starting\n\nThis comment is updated while the runner is alive."
+          COMMENT_ID=$(jq -n --arg body "$INITIAL" '{body:$body}' | gh api -X POST "repos/$GITHUB_REPOSITORY/issues/1/comments" --input - --jq '.id' 2>/dev/null || true)
+
+          update_live() {
+            [ -n "${COMMENT_ID:-}" ] || return 0
+            {
+              echo '### [GPT-2] Live Graphwar runner'
+              echo
+              echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+              echo "- Updated: $(date -u +'%Y-%m-%d %H:%M:%SZ')"
+              echo
+              echo '```text'
+              tail -n 100 agent-extra.log 2>/dev/null || echo 'agent log not started yet'
+              echo '```'
+            } > live-extra.md
+            jq -Rs '{body:.}' live-extra.md | gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" --input - >/dev/null 2>&1 || true
+          }
+
+          if [ -n "${COMMENT_ID:-}" ]; then
+            (
+              while true; do
+                sleep 60
+                update_live
+              done
+            ) &
+            LIVEPID=$!
+          else
+            LIVEPID=''
+          fi
+
+          set +e
+          timeout --signal=TERM --kill-after=10s 2700s \
+            java -javaagent:online-agent-extra.jar -jar graphwar.jar \
+            2>&1 | tee agent-extra.log
+          JAVA_RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "java_exit=$JAVA_RC" | tee run-status-extra.txt
+          [ -z "$LIVEPID" ] || kill "$LIVEPID" 2>/dev/null || true
+          update_live || true
+
+          sleep 2
+          ffmpeg -y -f x11grab -video_size 1280x800 -i :98 \
+            -frames:v 1 graphwar-extra-final.png >screenshot-extra.log 2>&1 || true
+
+          kill -INT "$FFPID" 2>/dev/null || true
+          sleep 3
+          kill "$XVPID" 2>/dev/null || true
+
+      - name: Upload recording and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphwar-extra-${{ github.run_number }}
+          compression-level: 1
+          path: |
+            graphwar-extra-*.mp4
+            graphwar-extra-final.png
+            agent-extra.log
+            run-status-extra.txt
+            xvfb-extra.log
+            ffmpeg-extra.log
+            screenshot-extra.log
+          if-no-files-found: warn
