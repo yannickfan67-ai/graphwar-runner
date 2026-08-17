@@ -1,90 +1,74 @@
-name: Graphwar Official Lobby Test
+name: Graphwar Official Autoplay
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/graphwar.yml"
   workflow_dispatch:
+  issues:
+    types: [edited]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: graphwar-official-autoplay
+  cancel-in-progress: true
 
 jobs:
   graphwar:
+    if: github.event_name != 'issues' || github.event.issue.number == 2
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Install GUI tools
+      - name: Install GUI/recording tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb ffmpeg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb ffmpeg
 
       - name: Download original Graphwar 1
         run: |
-          curl -fL "https://www.graphwar.com/graphwar_1/graphwar.jar" -o graphwar.jar
-          ls -lh graphwar.jar
+          curl -fL --retry 3 "https://www.graphwar.com/graphwar_1/graphwar.jar" -o graphwar.jar
+          test -s graphwar.jar
           file graphwar.jar
 
-      - name: Create GUI driver
+      - name: Fetch my AutoAgent source from issue 2
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          cat > Driver.java <<'EOF'
-          import java.awt.*;
-          import java.awt.event.*;
+          set -euo pipefail
+          gh issue view 2 --repo "$GITHUB_REPOSITORY" --json body --jq .body > agent-issue.txt
+          awk '
+            /^AUTOAGENT_GZIP_BASE64_V1/ { found=1; next }
+            found && NF { gsub(/\r/,""); print; exit }
+          ' agent-issue.txt > agent.b64
+          test -s agent.b64
+          mkdir -p src/Graphwar classes
+          base64 -d agent.b64 | gzip -dc > src/Graphwar/AutoAgent.java
+          grep -q "class AutoAgent" src/Graphwar/AutoAgent.java
+          sha256sum src/Graphwar/AutoAgent.java
 
-          public class Driver {
-              static Robot r;
+      - name: Build AutoAgent
+        run: |
+          set -euo pipefail
+          javac -cp graphwar.jar -d classes src/Graphwar/AutoAgent.java
+          printf 'Premain-Class: Graphwar.AutoAgent\n' > MANIFEST.MF
+          jar cfm autoagent.jar MANIFEST.MF -C classes .
+          jar tf autoagent.jar | grep 'Graphwar/AutoAgent'
 
-              static void click(int x, int y) throws Exception {
-                  r.mouseMove(x, y);
-                  r.mousePress(InputEvent.BUTTON1_DOWN_MASK);
-                  r.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
-                  Thread.sleep(500);
-              }
-
-              static void type(String s) throws Exception {
-                  for (char c : s.toCharArray()) {
-                      int k = KeyEvent.getExtendedKeyCodeForChar(c);
-                      if (k == KeyEvent.VK_UNDEFINED) continue;
-                      boolean upper = Character.isUpperCase(c);
-                      if (upper) r.keyPress(KeyEvent.VK_SHIFT);
-                      r.keyPress(k);
-                      r.keyRelease(k);
-                      if (upper) r.keyRelease(KeyEvent.VK_SHIFT);
-                      Thread.sleep(40);
-                  }
-              }
-
-              public static void main(String[] args) throws Exception {
-                  r = new Robot();
-                  Thread.sleep(3500);
-
-                  // Main menu -> Join Global
-                  click(380, 540);
-                  Thread.sleep(700);
-
-                  // Name field
-                  click(670, 327);
-                  r.keyPress(KeyEvent.VK_CONTROL);
-                  r.keyPress(KeyEvent.VK_A);
-                  r.keyRelease(KeyEvent.VK_A);
-                  r.keyRelease(KeyEvent.VK_CONTROL);
-                  type("GPT-Actions");
-
-                  // Join button
-                  click(540, 376);
-
-                  // Let the official lobby load.
-                  Thread.sleep(12000);
-              }
-          }
-          EOF
-          javac Driver.java
-
-      - name: Run Graphwar and record
+      - name: Run original Graphwar on official server
         shell: bash
         run: |
-          set -x
+          set -uo pipefail
           export DISPLAY=:99
 
           Xvfb :99 -screen 0 1280x800x24 >xvfb.log 2>&1 &
@@ -94,38 +78,58 @@ jobs:
           ffmpeg -y \
             -f x11grab -framerate 20 -video_size 1280x800 -i :99 \
             -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
-            graphwar-official.mp4 >ffmpeg.log 2>&1 &
+            graphwar-official-autoplay.mp4 >ffmpeg.log 2>&1 &
           FFPID=$!
 
-          java -jar graphwar.jar >graphwar.log 2>&1 &
-          GWPID=$!
+          set +e
+          timeout --signal=TERM --kill-after=10s 465s \
+            java -javaagent:autoagent.jar -jar graphwar.jar \
+            >agent.log 2>&1
+          JAVA_RC=$?
+          set -e
 
-          sleep 1
-          java Driver || true
-
-          sleep 3
+          echo "java_exit=$JAVA_RC" | tee run-status.txt
+          sleep 2
 
           ffmpeg -y \
             -f x11grab -video_size 1280x800 -i :99 \
-            -frames:v 1 graphwar-official.png \
+            -frames:v 1 graphwar-final.png \
             >screenshot.log 2>&1 || true
 
           kill -INT "$FFPID" 2>/dev/null || true
           sleep 2
-          kill "$GWPID" "$XVPID" 2>/dev/null || true
+          kill "$XVPID" 2>/dev/null || true
 
-          echo "===== graphwar.log ====="
-          cat graphwar.log || true
+          echo "===== agent.log tail ====="
+          tail -n 160 agent.log || true
 
-      - name: Upload Graphwar result
+      - name: Report to control issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo '### [GPT-BOT] Graphwar run finished'
+            echo
+            echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "- Trigger: $GITHUB_EVENT_NAME"
+            echo
+            echo '```text'
+            tail -n 120 agent.log 2>/dev/null || echo "agent.log unavailable"
+            echo '```'
+          } > comment.md
+          gh issue comment 1 --repo "$GITHUB_REPOSITORY" --body-file comment.md
+
+      - name: Upload result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: graphwar-official-result
+          name: graphwar-official-autoplay
           path: |
-            graphwar-official.png
-            graphwar-official.mp4
-            graphwar.log
+            graphwar-official-autoplay.mp4
+            graphwar-final.png
+            agent.log
+            run-status.txt
             xvfb.log
             ffmpeg.log
             screenshot.log
