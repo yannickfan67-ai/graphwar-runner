@@ -3,11 +3,14 @@ package Graphwar;
 import java.awt.Frame;
 import java.lang.instrument.Instrumentation;
 import java.util.*;
+import GraphServer.Constants;
 
 public class AutoAgent {
   static final String NAME="GPT";
   static final long END=System.currentTimeMillis()+7*60_000L;
   static final Random R=new Random(0x475054L);
+  static volatile boolean LAST_HAS_ANGLE=false;
+  static volatile double LAST_ANGLE=0;
   static void log(String s){System.out.println("[GPT-BOT] "+s);System.out.flush();}
   static void nap(long n){try{Thread.sleep(n);}catch(Exception e){}}
 
@@ -37,8 +40,8 @@ public class AutoAgent {
       log("ROOMS="+gc.getRooms().size());
       Room r=pick(gc.getRooms());
       while(r==null&&System.currentTimeMillis()<END){nap(2000);r=pick(gc.getRooms());}
-      if(r==null){log("No occupied normal Public Room");return;}
-      log("JOIN_ROOM "+r.getName()+" p="+r.getNumPlayers()+" "+r.getIp()+":"+r.getPort());
+      if(r==null){log("No occupied Public Room");return;}
+      log("JOIN_ROOM "+r.getName()+" mode="+r.getGameMode()+" p="+r.getNumPlayers()+" "+r.getIp()+":"+r.getPort());
 
       g.joinGame(r.getIp(),r.getPort());
       GameData gd=g.getGameData();
@@ -56,12 +59,14 @@ public class AutoAgent {
       while(System.currentTimeMillis()<END){
         int st=gd.getGameState();
         if(st==2){
-          if(!started){started=true;g.getUI().setScreen(3);log("GAME_STARTED players="+gd.getPlayers().size());dump(gd.getPlayers());}
+          if(!started){started=true;g.getUI().setScreen(3);log("GAME_STARTED mode="+gd.getGameMode()+" players="+gd.getPlayers().size());dump(gd.getPlayers());}
           Player cur=gd.getCurrentTurnPlayer();
           if(cur!=null&&cur.isLocalPlayer()&&!gd.isDrawingFunction()&&!gd.isExploding()){
             int s=cur.getCurrentTurnSoldierIndex();
             if(cur.getID()!=lastP||s!=lastS||System.currentTimeMillis()-last>8000){
-              String f=aim(gd,cur);log("FIRE "+f);gd.sendFunction(f);
+              String f=aim(gd,cur);
+              if(LAST_HAS_ANGLE){gd.setAngle(LAST_ANGLE);nap(120);log("ANGLE "+fmt(LAST_ANGLE));}
+              log("FIRE "+f);gd.sendFunction(f);
               lastP=cur.getID();lastS=s;last=System.currentTimeMillis();nap(1200);
             }
           }
@@ -75,8 +80,8 @@ public class AutoAgent {
   static Room pick(List<Room> rs){
     Room b=null;int bs=-999;
     for(Room r:new ArrayList<>(rs)){
-      if(r.getGameMode()!=0||r.getNumPlayers()<1||r.getNumPlayers()>=9||!r.getName().startsWith("Public Room"))continue;
-      int s=100-Math.abs(r.getNumPlayers()-1)*10;
+      if(r.getGameMode()<0||r.getGameMode()>2||r.getNumPlayers()<1||r.getNumPlayers()>=9||!r.getName().startsWith("Public Room"))continue;
+      int s=100-Math.abs(r.getNumPlayers()-1)*10-r.getGameMode();
       if(s>bs){bs=s;b=r;}
     }
     return b;
@@ -88,10 +93,21 @@ public class AutoAgent {
   }
 
   static String aim(GameData gd,Player me){
-    if(gd.getGameMode()!=0)return "0";
+    LAST_HAS_ANGLE=false;LAST_ANGLE=0;
     Player[] ps=gd.getPlayers().toArray(new Player[0]);int ci=-1;
     for(int i=0;i<ps.length;i++)if(ps[i]==me){ci=i;break;}
     Soldier sh=me.getCurrentTurnSoldier();if(ci<0||sh==null)return "0";
+    int mode=gd.getGameMode();
+    if(mode==Constants.FST_ODE||mode==Constants.SND_ODE){
+      Candidate o=searchODE(gd,ps,ci,me,mode);
+      if(o!=null){
+        if(mode==Constants.SND_ODE){LAST_HAS_ANGLE=true;LAST_ANGLE=o.angle;}
+        log("BEST_ODE mode="+mode+" score="+(long)o.score+" tested="+o.n+" hit="+o.hit);
+        return o.f;
+      }
+      return "0";
+    }
+
     Candidate best=null;
     for(int pi=0;pi<ps.length;pi++)if(ps[pi].getTeam()!=me.getTeam())
       for(int si=0;si<ps[pi].getNumSoldiers();si++){
@@ -100,7 +116,7 @@ public class AutoAgent {
         if(c!=null&&(best==null||c.score>best.score))best=c;
         if(best!=null&&best.score>9000)return best.f;
       }
-    if(best!=null){log("BEST score="+best.score+" tested="+best.n);return best.f;}
+    if(best!=null){log("BEST score="+(long)best.score+" tested="+best.n);return best.f;}
     return fallback(ps,me,sh,gd.isTerrainReversed());
   }
 
@@ -127,6 +143,72 @@ public class AutoAgent {
     }catch(Throwable x){return null;}
   }
 
+  static Candidate searchODE(GameData gd,Player[] ps,int ci,Player me,int mode){
+    Candidate best=null;int n=0;
+    int randomCount=mode==Constants.SND_ODE?3200:2600;
+    for(int i=0;i<randomCount;i++){
+      try{
+        PolishNotationFunction p=new PolishNotationFunction();p.makeRandomFunction(mode);
+        double angle=mode==Constants.SND_ODE?rr(-Math.PI/2,Math.PI/2):0;
+        Candidate c=evalODE(gd,ps,ci,me,p,angle,++n);
+        if(c!=null&&(best==null||c.score>best.score))best=c;
+        if(c!=null&&c.hit&&c.friendly==0){c.n=n;return c;}
+      }catch(Throwable x){}
+    }
+    if(best==null)return null;
+    int mutateCount=mode==Constants.SND_ODE?4200:3600;
+    for(int i=0;i<mutateCount;i++){
+      try{
+        PolishNotationFunction p=new PolishNotationFunction(best.pn,mode);
+        double angle=0;
+        if(mode==Constants.SND_ODE){
+          angle=best.angle+R.nextGaussian()*0.16;
+          if(angle>Math.PI/2)angle=Math.PI/2;if(angle<-Math.PI/2)angle=-Math.PI/2;
+        }
+        Candidate c=evalODE(gd,ps,ci,me,p,angle,++n);
+        if(c!=null&&c.score>best.score)best=c;
+        if(c!=null&&c.hit&&c.friendly==0){c.n=n;return c;}
+      }catch(Throwable x){}
+    }
+    best.n=n;return best;
+  }
+
+  static Candidate evalODE(GameData gd,Player[] ps,int ci,Player me,PolishNotationFunction pn,double angle,int n){
+    try{
+      Function f=new Function(pn);
+      boolean inv=me.getTeam()==Constants.TEAM2;
+      int mode=gd.getGameMode();
+      if(mode==Constants.FST_ODE)f.processRK4Range(gd.getObstacle(),ps,ps.length,ci,inv);
+      else f.processRK42Range(gd.getObstacle(),ps,ps.length,ci,angle,inv);
+
+      int enemyHits=0,friendly=0;
+      for(int i=0;i<f.getNumPlayersHit();i++){
+        int p=f.getPlayerHit(i);if(p<0||p>=ps.length)continue;
+        if(ps[p].getTeam()==me.getTeam())friendly++;else enemyHits++;
+      }
+
+      double minDist=1_000_000.0;
+      for(Player p:ps)if(p.getTeam()!=me.getTeam()){
+        for(Soldier s:p.getSoldiers())if(s!=null&&s.isAlive()){
+          double soldierMin=Double.MAX_VALUE;
+          for(int k=0;k<f.getNumSteps();k++){
+            double fy=f.getY(k),fx=f.getX(k);
+            if(!Double.isFinite(fx)||!Double.isFinite(fy))continue;
+            double py=(-Constants.PLANE_LENGTH*fy/Constants.PLANE_GAME_LENGTH+Constants.PLANE_HEIGHT/2.0);
+            double px=(Constants.PLANE_LENGTH*fx/Constants.PLANE_GAME_LENGTH+Constants.PLANE_LENGTH/2.0);
+            if(inv)px=Constants.PLANE_LENGTH-px;
+            double dx=px-s.getX(),dy=py-s.getY();
+            double ds=dx*dx+dy*dy;if(ds<soldierMin)soldierMin=ds;
+          }
+          if(soldierMin<minDist)minDist=soldierMin;
+        }
+      }
+      if(!Double.isFinite(minDist))minDist=1_000_000;
+      double score=enemyHits*3_000_000.0-friendly*4_000_000.0+(1_000_000.0-Math.min(1_000_000.0,minDist));
+      return new Candidate(pn,score,enemyHits>0,friendly,n,angle);
+    }catch(Throwable x){return null;}
+  }
+
   static String fallback(Player[] ps,Player me,Soldier sh,boolean inv){
     Soldier b=null;double bd=1e99;
     for(Player p:ps)if(p.getTeam()!=me.getTeam())for(Soldier s:p.getSoldiers())if(s!=null&&s.isAlive()){
@@ -145,5 +227,9 @@ public class AutoAgent {
   }
   static String fmt(double v){if(Math.abs(v)<5e-7)v=0;return String.format(Locale.US,"%.7f",v).replaceAll("0+$","").replaceAll("\\.$","");}
   static double rr(double a,double b){return a+R.nextDouble()*(b-a);}
-  static class Candidate{String f;int score,n,friendly;boolean hit;Candidate(String f,int s,boolean h,int fr,int n){this.f=f;score=s;hit=h;friendly=fr;this.n=n;}}
+  static class Candidate{
+    String f;double score;int n,friendly;boolean hit;double angle;PolishNotationFunction pn;
+    Candidate(String f,double s,boolean h,int fr,int n){this.f=f;score=s;hit=h;friendly=fr;this.n=n;angle=0;pn=null;}
+    Candidate(PolishNotationFunction p,double s,boolean h,int fr,int n,double a){pn=p;f=p.getStringFunction();score=s;hit=h;friendly=fr;this.n=n;angle=a;}
+  }
 }
