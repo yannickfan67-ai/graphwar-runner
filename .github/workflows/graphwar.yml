@@ -7,10 +7,16 @@ on:
       - ".github/workflows/graphwar.yml"
       - "src/Graphwar/*.java"
   workflow_dispatch:
+    inputs:
+      chain:
+        description: "Unattended continuation index"
+        required: false
+        default: "0"
 
 permissions:
   contents: read
   issues: write
+  actions: write
 
 concurrency:
   group: graphwar-official-autoplay
@@ -19,7 +25,7 @@ concurrency:
 jobs:
   graphwar:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 330
 
     steps:
       - name: Check out runner source
@@ -65,13 +71,13 @@ jobs:
           sleep 1
 
           ffmpeg -y \
-            -f x11grab -framerate 20 -video_size 1280x800 -i :99 \
-            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            -f x11grab -framerate 8 -video_size 1280x800 -i :99 \
+            -c:v libx264 -preset veryfast -crf 30 -pix_fmt yuv420p \
             graphwar-official-autoplay.mp4 >ffmpeg.log 2>&1 &
           FFPID=$!
 
           set +e
-          timeout --signal=TERM --kill-after=10s 760s \
+          timeout --signal=TERM --kill-after=10s 18120s \
             java -javaagent:autoagent.jar -jar graphwar.jar \
             >agent.log 2>&1
           JAVA_RC=$?
@@ -90,7 +96,7 @@ jobs:
           kill "$XVPID" 2>/dev/null || true
 
           echo "===== agent.log tail ====="
-          tail -n 320 agent.log || true
+          tail -n 400 agent.log || true
 
       - name: Report to control issue
         if: always()
@@ -98,13 +104,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo '### [GPT-BOT] Graphwar run finished'
+            echo '### [GPT-BOT] Graphwar unattended run finished'
             echo
             echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "- Trigger: $GITHUB_EVENT_NAME"
+            echo "- Chain: ${{ inputs.chain || '0' }}"
             echo
             echo '```text'
-            tail -n 240 agent.log 2>/dev/null || echo "agent.log unavailable"
+            tail -n 300 agent.log 2>/dev/null || echo "agent.log unavailable"
             echo '```'
           } > comment.md
 
@@ -120,11 +127,12 @@ jobs:
             echo "::warning::GitHub issue API unavailable; artifact still contains agent.log"
           fi
 
-      - name: Upload result
+      - name: Upload result and recording
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: graphwar-official-autoplay
+          name: graphwar-official-autoplay-${{ github.run_number }}
+          compression-level: 1
           path: |
             graphwar-official-autoplay.mp4
             graphwar-final.png
@@ -134,3 +142,26 @@ jobs:
             ffmpeg.log
             screenshot.log
           if-no-files-found: warn
+
+      - name: Continue unattended if no win
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHAIN: ${{ inputs.chain || '0' }}
+        shell: bash
+        run: |
+          if grep -q 'WIN_REACHED' agent.log 2>/dev/null; then
+            echo "Win reached; unattended chain stops here."
+            exit 0
+          fi
+
+          if [ "$CHAIN" -ge 4 ]; then
+            echo "No win after 5 unattended sessions; stopping to avoid an unbounded Actions loop."
+            exit 0
+          fi
+
+          NEXT=$((CHAIN + 1))
+          echo "No win yet; dispatching unattended continuation $NEXT/4"
+          jq -nc --arg ref "$GITHUB_REF_NAME" --arg chain "$NEXT" \
+            '{ref:$ref,inputs:{chain:$chain}}' \
+            | gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/graphwar.yml/dispatches" --input -
