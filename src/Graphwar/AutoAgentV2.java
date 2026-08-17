@@ -29,8 +29,8 @@ public class AutoAgentV2 {
       String k=r.getIp()+":"+r.getPort();
       if(cooldown.getOrDefault(k,0L)<=now)out.add(r);
     }
-    out.sort(Comparator.comparingInt(Room::getNumPlayers));
-    log("CANDIDATES="+out.size());
+    out.sort(Comparator.comparingInt(Room::getNumPlayers).reversed());
+    log("CANDIDATES="+out.size()+" prefer=near-full");
     for(Room r:out)log("CAND "+r.getName()+" p="+r.getNumPlayers()+" "+r.getIp()+":"+r.getPort());
     return out;
   }
