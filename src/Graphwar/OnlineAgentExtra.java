@@ -7,7 +7,7 @@ import GraphServer.Constants;
 
 public class OnlineAgentExtra {
   static final String NAME = "GPT-2";
-  static final String TARGET_ROOM = "UniRoom #1";
+  static final String TARGET_ROOM = "Public Room 0";
   static final long END = System.currentTimeMillis() + 45L*60_000L;
   static void log(String s){System.out.println("[GPT-EXTRA] "+s);System.out.flush();}
   static void nap(long n){try{Thread.sleep(n);}catch(Exception e){}}
