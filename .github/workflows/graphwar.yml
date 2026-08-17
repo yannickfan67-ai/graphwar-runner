@@ -1,0 +1,132 @@
+name: Graphwar Official Lobby Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  graphwar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install GUI tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg
+
+      - name: Download original Graphwar 1
+        run: |
+          curl -fL "https://www.graphwar.com/graphwar_1/graphwar.jar" -o graphwar.jar
+          ls -lh graphwar.jar
+          file graphwar.jar
+
+      - name: Create GUI driver
+        run: |
+          cat > Driver.java <<'EOF'
+          import java.awt.*;
+          import java.awt.event.*;
+
+          public class Driver {
+              static Robot r;
+
+              static void click(int x, int y) throws Exception {
+                  r.mouseMove(x, y);
+                  r.mousePress(InputEvent.BUTTON1_DOWN_MASK);
+                  r.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
+                  Thread.sleep(500);
+              }
+
+              static void type(String s) throws Exception {
+                  for (char c : s.toCharArray()) {
+                      int k = KeyEvent.getExtendedKeyCodeForChar(c);
+                      if (k == KeyEvent.VK_UNDEFINED) continue;
+                      boolean upper = Character.isUpperCase(c);
+                      if (upper) r.keyPress(KeyEvent.VK_SHIFT);
+                      r.keyPress(k);
+                      r.keyRelease(k);
+                      if (upper) r.keyRelease(KeyEvent.VK_SHIFT);
+                      Thread.sleep(40);
+                  }
+              }
+
+              public static void main(String[] args) throws Exception {
+                  r = new Robot();
+                  Thread.sleep(3500);
+
+                  // Main menu -> Join Global
+                  click(380, 540);
+                  Thread.sleep(700);
+
+                  // Name field
+                  click(670, 327);
+                  r.keyPress(KeyEvent.VK_CONTROL);
+                  r.keyPress(KeyEvent.VK_A);
+                  r.keyRelease(KeyEvent.VK_A);
+                  r.keyRelease(KeyEvent.VK_CONTROL);
+                  type("GPT-Actions");
+
+                  // Join button
+                  click(540, 376);
+
+                  // Let the official lobby load.
+                  Thread.sleep(12000);
+              }
+          }
+          EOF
+          javac Driver.java
+
+      - name: Run Graphwar and record
+        shell: bash
+        run: |
+          set -x
+          export DISPLAY=:99
+
+          Xvfb :99 -screen 0 1280x800x24 >xvfb.log 2>&1 &
+          XVPID=$!
+          sleep 1
+
+          ffmpeg -y \
+            -f x11grab -framerate 20 -video_size 1280x800 -i :99 \
+            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            graphwar-official.mp4 >ffmpeg.log 2>&1 &
+          FFPID=$!
+
+          java -jar graphwar.jar >graphwar.log 2>&1 &
+          GWPID=$!
+
+          sleep 1
+          java Driver || true
+
+          sleep 3
+
+          ffmpeg -y \
+            -f x11grab -video_size 1280x800 -i :99 \
+            -frames:v 1 graphwar-official.png \
+            >screenshot.log 2>&1 || true
+
+          kill -INT "$FFPID" 2>/dev/null || true
+          sleep 2
+          kill "$GWPID" "$XVPID" 2>/dev/null || true
+
+          echo "===== graphwar.log ====="
+          cat graphwar.log || true
+
+      - name: Upload Graphwar result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphwar-official-result
+          path: |
+            graphwar-official.png
+            graphwar-official.mp4
+            graphwar.log
+            xvfb.log
+            ffmpeg.log
+            screenshot.log
+          if-no-files-found: warn
