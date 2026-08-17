@@ -53,12 +53,13 @@ public class OnlineAgentExtra {
     for(Room r:new ArrayList<>(all)){
       if(r.getNumPlayers()<2||r.getNumPlayers()>=10)continue;
       if(r.getGameMode()<0||r.getGameMode()>2)continue;
-      if(!r.getName().startsWith("Public Room"))continue;
+      String roomName=r.getName();
+      if(!(roomName.startsWith("Public Room")||roomName.startsWith("Cool Room")))continue;
       String k=r.getIp()+":"+r.getPort();
       if(cd.getOrDefault(k,0L)<=now)out.add(r);
     }
     out.sort(Comparator.comparingInt(Room::getNumPlayers).reversed().thenComparingInt(Room::getGameMode));
-    log("CANDIDATES="+out.size()+" prefer=most-populated minPlayers=2");
+    log("CANDIDATES="+out.size()+" roomTypes=Public+Cool prefer=most-populated minPlayers=2");
     for(Room r:out)log("CAND "+r.getName()+" p="+r.getNumPlayers()+" mode="+r.getGameMode()+" "+r.getIp()+":"+r.getPort());
     return out;
   }
