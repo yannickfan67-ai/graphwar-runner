@@ -1,0 +1,217 @@
+name: Graphwar Local GPT Until Win
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/Graphwar/LocalManualBattle.java'
+      - '.github/scripts/patch_graphwar_11.py'
+      - '.github/workflows/graphwar-local-until-win.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: graphwar-local-gpt-until-win
+  cancel-in-progress: true
+
+jobs:
+  play-local-until-win:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install GUI and recorder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb ffmpeg
+
+      - name: Download and patch Graphwar
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 'https://www.graphwar.com/graphwar_1/graphwar.jar' -o graphwar.jar
+          python3 .github/scripts/patch_graphwar_11.py graphwar.jar graphwar-11.jar
+          test -s graphwar-11.jar
+
+      - name: Build manual-control agent
+        run: |
+          set -euo pipefail
+          mkdir -p local-classes
+          javac -cp graphwar-11.jar -d local-classes src/Graphwar/LocalManualBattle.java
+          printf 'Premain-Class: Graphwar.LocalManualBattle\n' > MANIFEST-LOCAL.MF
+          jar cfm local-manual-agent.jar MANIFEST-LOCAL.MF -C local-classes .
+          jar tf local-manual-agent.jar | grep 'Graphwar/LocalManualBattle.class'
+
+      - name: Play local 4v40 until win
+        id: battle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          export DISPLAY=:97
+          mkdir -p local-until-win
+          Xvfb :97 -screen 0 1280x800x24 >local-until-win/xvfb.log 2>&1 &
+          XVPID=$!
+          sleep 1
+
+          INITIAL="### [LOCAL-MANUAL] Graphwar 4v40 until win
+
+          - Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - Status: starting
+          - Rules: GPT 4 soldiers vs 10 Over-9000 AIs x 4 soldiers
+          - Control: GPT turn clock pauses only while waiting for ChatGPT; AI timing is unchanged."
+          COMMENT_ID=$(jq -n --arg body "$INITIAL" '{body:$body}' | gh api -X POST "repos/$GITHUB_REPOSITORY/issues/1/comments" --input - --jq '.id' 2>/dev/null || true)
+
+          update_live() {
+            local attempt="$1" dir="$2" status="$3"
+            [ -n "${COMMENT_ID:-}" ] || return 0
+            {
+              echo '### [LOCAL-MANUAL] Graphwar 4v40 until win'
+              echo
+              echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+              echo "- Attempt: $attempt"
+              echo "- Status: $status"
+              echo "- Updated: $(date -u +'%Y-%m-%d %H:%M:%SZ')"
+              echo '- Rules: GPT 4 soldiers vs 10 Over-9000 AIs x 4 soldiers'
+              echo
+              echo '```text'
+              if [ -f "$dir/state.txt" ]; then
+                cat "$dir/state.txt"
+              else
+                echo 'state not available yet'
+              fi
+              if [ -f "$dir/probe-result.txt" ]; then
+                echo
+                echo '--- probe-result ---'
+                cat "$dir/probe-result.txt"
+              fi
+              if [ -f "$dir/result.txt" ]; then
+                echo
+                echo '--- result ---'
+                cat "$dir/result.txt"
+              fi
+              echo
+              echo '--- log tail ---'
+              tail -n 25 "$dir/manual.log" 2>/dev/null || true
+              echo '```'
+            } > local-until-win/live.md
+            jq -Rs '{body:.}' local-until-win/live.md | gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" --input - >/dev/null 2>&1 || true
+          }
+
+          bridge_commands() {
+            local attempt="$1" dir="$2"
+            [ -f "$dir/state.txt" ] || return 0
+            grep -q '^status=WAITING_FOR_GPT_COMMAND$' "$dir/state.txt" || return 0
+            local turn
+            turn=$(sed -n 's/^turn=//p' "$dir/state.txt" | head -1)
+            [ -n "$turn" ] || return 0
+
+            local comments
+            comments=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/1/comments?per_page=100" 2>/dev/null | jq -s 'add' 2>/dev/null || echo '[]')
+
+            local ptag ctag pid pbody cid cbody old
+            ptag="[LOCAL-PROBE] attempt=$attempt turn=$turn"
+            ctag="[LOCAL-CMD] attempt=$attempt turn=$turn formula="
+
+            pid=$(printf '%s' "$comments" | jq -r --arg tag "$ptag" '[.[] | select(.body|startswith($tag))] | last | .id // empty' 2>/dev/null || true)
+            if [ -n "$pid" ]; then
+              old=$(cat "$dir/.last_probe_comment" 2>/dev/null || true)
+              if [ "$pid" != "$old" ]; then
+                pbody=$(printf '%s' "$comments" | jq -r --argjson id "$pid" '.[] | select(.id==$id) | .body' | tail -n +2)
+                printf '%s\n' "$pbody" > "$dir/probe.txt"
+                printf '%s' "$pid" > "$dir/.last_probe_comment"
+              fi
+            fi
+
+            cid=$(printf '%s' "$comments" | jq -r --arg tag "$ctag" '[.[] | select(.body|startswith($tag))] | last | .id // empty' 2>/dev/null || true)
+            if [ -n "$cid" ]; then
+              old=$(cat "$dir/.last_cmd_comment" 2>/dev/null || true)
+              if [ "$cid" != "$old" ]; then
+                cbody=$(printf '%s' "$comments" | jq -r --argjson id "$cid" '.[] | select(.id==$id) | .body')
+                printf '%s\n' "${cbody#*formula=}" > "$dir/command.txt"
+                printf '%s' "$cid" > "$dir/.last_cmd_comment"
+              fi
+            fi
+          }
+
+          WIN=0
+          ATTEMPT=0
+          while [ "$WIN" -eq 0 ]; do
+            ATTEMPT=$((ATTEMPT+1))
+            DIR=$(printf 'local-until-win/attempt-%03d' "$ATTEMPT")
+            mkdir -p "$DIR"
+            echo "[RUNNER] starting attempt $ATTEMPT" | tee -a local-until-win/runner.log
+
+            ffmpeg -y -f x11grab -framerate 10 -video_size 1280x800 -i :97 \
+              -c:v libx264 -preset veryfast -crf 31 -pix_fmt yuv420p \
+              "$DIR/full-session.mp4" >"$DIR/ffmpeg.log" 2>&1 &
+            FFPID=$!
+            sleep 1
+
+            PORT=$((26112 + ATTEMPT % 1000))
+            DISPLAY=:97 java \
+              -Dgw.out="$DIR" -Dgw.attempt="$ATTEMPT" -Dgw.port="$PORT" \
+              -Dgw.aiLevel=9001 -Dgw.aiCount=10 -Dgw.mySoldiers=4 -Dgw.aiSoldiers=4 \
+              -javaagent:local-manual-agent.jar -jar graphwar-11.jar \
+              >"$DIR/java.log" 2>&1 &
+            JPID=$!
+
+            while kill -0 "$JPID" 2>/dev/null; do
+              bridge_commands "$ATTEMPT" "$DIR"
+              update_live "$ATTEMPT" "$DIR" 'running'
+              sleep 10
+            done
+            wait "$JPID" || true
+
+            kill -INT "$FFPID" 2>/dev/null || true
+            wait "$FFPID" 2>/dev/null || true
+            update_live "$ATTEMPT" "$DIR" 'attempt finished'
+
+            if grep -q '^result=WIN$' "$DIR/result.txt" 2>/dev/null; then
+              WIN=1
+              cp "$DIR/full-session.mp4" local-until-win/WIN-full-session.mp4
+              cp "$DIR/state.txt" local-until-win/WIN-last-state.txt 2>/dev/null || true
+              cp "$DIR/result.txt" local-until-win/WIN-result.txt
+              cp "$DIR/manual.log" local-until-win/WIN-manual.log 2>/dev/null || true
+              echo "$ATTEMPT" > local-until-win/winning-attempt.txt
+              update_live "$ATTEMPT" "$DIR" 'WIN'
+              echo "[RUNNER] WIN on attempt $ATTEMPT" | tee -a local-until-win/runner.log
+            else
+              rm -f "$DIR/full-session.mp4"
+              echo "[RUNNER] attempt $ATTEMPT lost/drew; retrying" | tee -a local-until-win/runner.log
+              sleep 2
+            fi
+          done
+
+          kill "$XVPID" 2>/dev/null || true
+          echo "winning_attempt=$ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload winning recording and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphwar-local-until-win-${{ github.run_number }}
+          compression-level: 1
+          if-no-files-found: warn
+          path: |
+            local-until-win/WIN-full-session.mp4
+            local-until-win/WIN-result.txt
+            local-until-win/WIN-last-state.txt
+            local-until-win/WIN-manual.log
+            local-until-win/winning-attempt.txt
+            local-until-win/runner.log
+            local-until-win/xvfb.log
+            local-until-win/attempt-*/manual.log
+            local-until-win/attempt-*/result.txt
+            local-until-win/attempt-*/java.log
+            local-until-win/attempt-*/probe-result.txt
