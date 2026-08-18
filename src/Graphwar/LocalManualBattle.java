@@ -32,6 +32,7 @@ public class LocalManualBattle {
             int aiCount = Integer.parseInt(System.getProperty("gw.aiCount", "10"));
             int mySoldiers = Integer.parseInt(System.getProperty("gw.mySoldiers", "4"));
             int aiSoldiers = Integer.parseInt(System.getProperty("gw.aiSoldiers", "4"));
+            int expectedEnemies = aiCount * aiSoldiers;
 
             Graphwar gw = waitForGraphwar();
             log("FRAME_READY attempt=" + attempt);
@@ -63,16 +64,23 @@ public class LocalManualBattle {
             waitUntil(() -> gd.getGameState() == Constants.GAME, 20000, "game start");
             log("GAME_STARTED players=" + gd.getPlayers().size());
 
-            boolean sawGame = true;
+            // GAME state flips slightly before all Soldier.alive flags are initialized.
+            // Never judge a result until the expected 4-vs-40 armies have actually appeared.
+            waitUntil(() -> aliveTeam(gd, Constants.TEAM1) >= mySoldiers &&
+                            aliveTeam(gd, Constants.TEAM2) >= expectedEnemies,
+                      15000, "army initialization");
+            log("ARMIES_READY ownAlive=" + aliveTeam(gd, Constants.TEAM1) +
+                " enemyAlive=" + aliveTeam(gd, Constants.TEAM2));
+
             boolean humanTurnLatched = false;
             while (true) {
                 int ownAlive = aliveTeam(gd, Constants.TEAM1);
                 int enemyAlive = aliveTeam(gd, Constants.TEAM2);
-                if (sawGame && ownAlive <= 0 && enemyAlive > 0) {
+                if (ownAlive <= 0 && enemyAlive > 0) {
                     finish("LOSS", ownAlive, enemyAlive);
                     break;
                 }
-                if (sawGame && ownAlive > 0 && enemyAlive <= 0) {
+                if (ownAlive > 0 && enemyAlive <= 0) {
                     finish("WIN", ownAlive, enemyAlive);
                     break;
                 }
@@ -218,8 +226,7 @@ public class LocalManualBattle {
     private static void doProbe(GameData gd, String content) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append("attempt=").append(attempt).append(" turn=").append(manualTurn).append('\n');
-        String[] lines = content.split("\\R");
-        for (String raw : lines) {
+        for (String raw : content.split("\\R")) {
             String formula = raw.trim();
             if (formula.isEmpty() || formula.startsWith("#")) continue;
             try {
