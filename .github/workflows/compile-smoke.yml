@@ -1,0 +1,40 @@
+name: Graphwar Compile Smoke
+
+on:
+  push:
+    paths:
+      - 'src/Graphwar/**'
+      - '.github/workflows/compile-smoke.yml'
+  pull_request:
+    paths:
+      - 'src/Graphwar/**'
+      - '.github/workflows/compile-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download Graphwar API jar
+        run: |
+          curl -fL --retry 3 --connect-timeout 15 \
+            'https://www.graphwar.com/graphwar_1/graphwar.jar' -o graphwar.jar
+          test -s graphwar.jar
+      - name: Compile every runner against Graphwar
+        run: |
+          mkdir -p classes
+          javac -encoding UTF-8 -cp graphwar.jar -d classes src/Graphwar/*.java
+          test -f classes/Graphwar/AutoAgent.class
+          test -f classes/Graphwar/AutoAgentV2.class
+          test -f classes/Graphwar/OnlineAgent.class
+          test -f classes/Graphwar/OnlineAgentExtra.class
+          test -f classes/Graphwar/LocalManualBattle.class
